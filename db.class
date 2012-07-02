@@ -1,0 +1,195 @@
+<?php
+
+/*	
+	Mysqli db connector class
+    (c) Copyright 2011 Emmanuel Higgins
+
+	eman@onlythebible.com 	|| support@emanwebdesign.com
+	www.onlythebible.com 	|| www.emanwebdesign.com
+	
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+define("DB_HOST","YOUR_DB_HOST");
+define("DB_USR","YOUR_DB_USER");
+define("DB_PWD","YOUR_DB_PWD");
+define("DB_SELECT","INITIAL_TABLE_TO_SELECT");
+
+class db {
+	public $totalQ = 0;
+	public $lastQ = '';
+	private $connection;
+	
+	function __construct() {
+		$this->connection = new mysqli(DB_HOST, DB_USR, DB_PWD, DB_SELECT);
+		
+		if ($this->connection->connect_error) {
+			die('Connect Error (' . $this->connection->connect_errno . ') ' . $this->connection->connect_error);
+		}
+		
+	}
+	
+	public function singleQ($sql,$params=false,$fetch=true,$trimArray=true,$arKey=false) {
+		$result = $this -> Q($sql,$params,$fetch,$trimArray,$arKey);
+		if(is_array($result)) return reset($result);
+		else return $result;
+	}
+	
+	/* 
+		******* mysql method "Q", perform prepared statments ********
+		$sql = statment to prepare
+		$params = array of string of i (integer), d (double), s (string) + variables
+		$fetch = boolean (fetch or otherwise execute)
+		Returns an associative array of the result set if $fetch is true
+	*/
+	public function Q($sql,$params=false,$fetch=true,$trimArray=true,$arKey=false) {
+		
+		$this->totalQ++;
+		$this->lastQ = $sql;
+		
+		if($params && is_array($params)) { // This is a prepared statment
+			
+			if(strpos($sql,'INSERT INTO') > -1){ // If true, then this is an insert statment, so we'll finish building the query
+				$numRows = preg_match('/\(([^\)]+)\)/',$sql,$numRowMatches);
+				
+				if($numRows){
+				
+					$numRows = substr_count($numRowMatches[1],',')+1;
+				
+				} else $numRows = substr_count($sql,',')+1;
+				
+				$tmp_sql = '';
+				$tmp_sql.= ' VALUES (';
+				for($i=0;$i<$numRows;$i++) $tmp_sql.= "?".($i+1!=$numRows ? ',' : ')');
+				
+				if(strpos($sql,'#') > -1) {
+				
+					$sql = str_replace('#',$tmp_sql,$sql);
+					
+				} else $sql .= $tmp_sql;
+				
+				$this->lastQ = $sql;
+			}
+			
+			// Generate Types
+			$types = '';                        //initial sting with types
+			foreach($params as $param) {        //for each element, determine type and add
+				if(is_int($param)) {
+					$types .= 'i';              //integer
+				} elseif (is_float($param)) {
+					$types .= 'd';              //double
+				} elseif (is_string($param)) {
+					$types .= 's';              //string
+				} else {
+					$types .= 'b';              //blob and unknown
+				}
+			}
+			array_unshift($params, $types);
+			
+			$query = $this->connection->stmt_init();
+			if($query->prepare($sql)) {
+				call_user_func_array(array($query,'bind_param'),$this->refValues($params));
+				$query->execute(); 
+				
+				if($query->error) exit(printf("Error: %s\n", $query->error."<br/> ---- <br/>".$this->lastQ));
+				
+				if($fetch){ // Only if we want to return an array of results
+					// Get Metadata
+					$meta = $query->result_metadata();
+					
+					if(is_object($meta)) {
+					
+						$fields = $results = array();
+						while ($field = $meta->fetch_field()) { 
+							$var = $field->name; 
+							$fields[$var] = &$$var; 
+							$fieldNames[] = $var;
+						}
+						
+						$fieldCount = count($fieldNames);
+											
+						call_user_func_array(array($query,'bind_result'),$fields);
+						
+						$i=0;
+						while ($query->fetch()){
+							$key = $arKey ? $fields[$arKey] : $i;
+							for($l=0;$l<$fieldCount;$l++) $results[$key][$fieldNames[$l]] = $fields[$fieldNames[$l]];
+							$i++;
+						}
+						
+						$resCount = count($results);
+						if(!$resCount) $results = false;
+						else if($resCount==1 && $trimArray) $results = $results[0];
+						
+					} else $results = false;
+				}
+			} else die(printf("Error: %s\n", $this->connection->error.' : '.$this->lastQ));
+		} else { // Just a common query
+			$query = $this->connection->query($sql);
+			if($fetch && is_object($query)) {
+				$resCount = $query->num_rows;
+				if($resCount == 1 && $trimArray) {
+					$results = $query->fetch_assoc();
+				} else if($resCount > 1 || $resCount == 1 && !$trimArray) {
+					$results = array();
+					while ($row = $query->fetch_assoc()) {
+						if($arKey && isset($row[$arKey])) $results[$row[$arKey]] = $row;
+						else $results[] = $row;
+					}
+				} else $results = false;
+			} else $results = false;
+		}
+		
+		if(!$query) die(printf("Error: %s\n", $this->connection->error.' : '.$this->lastQ));
+		if(is_object($query)) $query->close();		
+		
+		if($fetch)	return $results;
+	}
+	
+	private function refValues($arr){
+		if (strnatcmp(phpversion(),'5.3') >= 0) //Reference is required for PHP 5.3+ 
+		{ 
+			$refs = array(); 
+			foreach($arr as $key => $value) 
+				$refs[$key] = &$arr[$key]; 
+			return $refs; 
+		} 
+		return $arr; 
+	}
+	
+	public function getID($table,$col='id'){ // Get highest ID from a table and return incremented
+		$result = $this->sQ("SELECT `$col` FROM `$table` ORDER BY `$col` DESC LIMIT 1");
+		$id = $result->fetch_array(MYSQLI_ASSOC);
+		$id = $id[$col];
+		$id++;
+		return $id;
+	}
+	
+	public function sQ($sql){ // Simple Standard SQL query
+		$this->totalQ++;
+		$this->lastQ = $sql;
+		$query = $this->connection->query($sql);	
+		return($query);
+	}
+	
+	public function close() {
+		if(isset($this->connection)){
+			$this->connection->close();
+		}
+	}
+}
+
+$db = new db();
+
+?>
